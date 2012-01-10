@@ -111,81 +111,89 @@ sub find_nearest_node {
   return $best_node;
 }
 
-my $self = bless {}, __PACKAGE__;
-my $start_ll = [51.584483, -1.741585];
-my $target_len = 1.75;
-$self->get_region($start_ll, $target_len);
 
-my $start = $self->find_nearest_node($start_ll);
-Dump $start;
+sub main {
+    my $self = bless {}, __PACKAGE__;
+    my $start_ll = [51.584483, -1.741585];
+    my $target_len = 1.75;
+    $self->get_region($start_ll, $target_len);
+
+    my $start = $self->find_nearest_node($start_ll);
+    Dump $start;
 
 
-my $earth = $self->earth;
-my @frontier = (
-                {path => [$start],
-                 # Length, in miles, of the current path.
-                 pathlen => 0
-                }
-               );
-my %seen;
-my $longest_path = {pathlen => 0};
-my @terminals;
+    my $earth = $self->earth;
+    my @frontier = (
+        {path => [$start],
+         # Length, in miles, of the current path.
+         pathlen => 0
+        }
+        );
+    my %seen;
+    my $longest_path = {pathlen => 0};
+    my @terminals;
 
-while (@frontier) {
-  # Would using min_index from List::Utils be more efficent?  Quite possibly, or use an insertion sort when adding new nodes.
-  @frontier = sort {$a->{pathlen} <=> $b->{pathlen}} @frontier;
-  my $this_path = shift @frontier;
-  my $here = $this_path->{path}[-1];
+    while (@frontier) {
+        # Would using min_index from List::Utils be more efficent?  Quite possibly, or use an insertion sort when adding new nodes.
+        @frontier = sort {$a->{pathlen} <=> $b->{pathlen}} @frontier;
+        my $this_path = shift @frontier;
+        my $here = $this_path->{path}[-1];
 
-  print $this_path->{pathlen}, ": ", join(", ", map {$_->{id}} @{$this_path->{path}}), "\n";
+        print $this_path->{pathlen}, ": ", join(", ", map {$_->{id}} @{$this_path->{path}}), "\n";
 
-  if (exists $seen{$here->{id}}) {
-    if ($seen{$here->{id}} > $this_path->{pathlen}) {
-      print "Hmm, found a shorter path later?  Shouldn't happen.\n";
+        if (exists $seen{$here->{id}}) {
+            if ($seen{$here->{id}} > $this_path->{pathlen}) {
+                print "Hmm, found a shorter path later?  Shouldn't happen.\n";
+            }
+            next;
+        }
+
+        $seen{$here->{id}} = $this_path->{pathlen};
+
+        if ($this_path->{pathlen} > $longest_path->{pathlen}) {
+            $longest_path = $this_path;
+        }
+
+        for my $link (@{$here->{links}}) {
+            #Dump $link;
+            next if $link->[0]{tag}{highway} and $link->[0]{tag}{highway} ~~ ['trunk', 'trunk_link'];
+
+            my $new_node = $self->{nodes}{$link->[1]};
+            my $new_len = $earth->range($here->{lat}, $here->{lon}, $new_node->{lat}, $new_node->{lon});
+            my $new_path = {
+                path => [ @{$this_path->{path}}, $new_node ],
+                pathlen => $this_path->{pathlen} + $new_len
+            };
+
+            # Exit condition: stop paths when they get longer then a mile.
+            if ($new_path->{pathlen} >= $target_len) {
+                Dump $new_path;
+                push @terminals, $new_node;
+                #print "Found path over a mile:\n";
+                #print Dumper $new_path;
+            } else {
+                push @frontier, $new_path;
+            }
+        }
+
+        if (not @{$here->{links}}) {
+            # Hmm.  This is the presumable cause of "gaps" in the outer rim.  OTOH, putting in all of these will make it no longer a rim so much as a bunch of dead ends.
+            # I see no clear way of fixing this outside of completely revamping the UI... which I planned to do anyway.
+        }
     }
-    next;
-  }
-
-  $seen{$here->{id}} = $this_path->{pathlen};
-
-  if ($this_path->{pathlen} > $longest_path->{pathlen}) {
-    $longest_path = $this_path;
-  }
-
-  for my $link (@{$here->{links}}) {
-    #Dump $link;
-    next if $link->[0]{tag}{highway} and $link->[0]{tag}{highway} ~~ ['trunk', 'trunk_link'];
-
-    my $new_node = $self->{nodes}{$link->[1]};
-    my $new_len = $earth->range($here->{lat}, $here->{lon}, $new_node->{lat}, $new_node->{lon});
-    my $new_path = {
-                    path => [ @{$this_path->{path}}, $new_node ],
-                    pathlen => $this_path->{pathlen} + $new_len
-                   };
-
-    # Exit condition: stop paths when they get longer then a mile.
-    if ($new_path->{pathlen} >= $target_len) {
-      Dump $new_path;
-      push @terminals, $new_node;
-      #print "Found path over a mile:\n";
-      #print Dumper $new_path;
-    } else {
-      push @frontier, $new_path;
-    }
-  }
-
-  if (not @{$here->{links}}) {
-    # Hmm.  This is the presumable cause of "gaps" in the outer rim.  OTOH, putting in all of these will make it no longer a rim so much as a bunch of dead ends.
-    # I see no clear way of fixing this outside of completely revamping the UI... which I planned to do anyway.
-  }
-}
 
 #print "Longest path found: \n";
 #print Dumper $longest_path;
 
-open my $kml_out, ">foo.kml";
+    $self->write_kml($start_ll, \@terminals);
+}
 
-print $kml_out <<"END";
+sub write_kml {
+    my ($self, $start_ll, $terminals) = @_;
+
+    open my $kml_out, ">foo.kml";
+
+    print $kml_out <<"END";
 <?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Document>
@@ -214,14 +222,18 @@ print $kml_out <<"END";
 END
 
 #for my $node (@{$longest_path->{path}}) {
-for my $node (sort {($earth->bearing(@{$start_ll}, $a->{lat}, $a->{lon})) <=> ($earth->bearing(@{$start_ll}, $b->{lat}, $b->{lon}))} @terminals) {
+for my $node (sort {($self->earth->bearing(@{$start_ll}, $a->{lat}, $a->{lon})) <=> ($self->earth->bearing(@{$start_ll}, $b->{lat}, $b->{lon}))} @$terminals) {
   printf $kml_out "%f,%f,0\n", $node->{lon}, $node->{lat};
 }
 
-print $kml_out <<"END";
+    print $kml_out <<"END";
         </coordinates>
       </LineString>
     </Placemark>
   </Document>
 </kml>
 END
+
+}
+
+main();
