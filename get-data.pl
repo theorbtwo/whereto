@@ -6,7 +6,23 @@ use 5.10.0;
 use Geo::Ellipsoid;
 use LWP::Simple 'get';
 use Geo::Parse::OSM::Multipass;
+use Getopt::Long;
 use Data::Dump::Streamer 'Dump', 'Dumper';
+
+## Setup, params:
+my ($start_lat, $start_lon, $distance_mi, $start_ll); 
+my $result = GetOptions("latitude=s" => \$start_lat,
+                        "longitude=s" => \$start_lon,
+                        "distance=s" => \$distance_mi,
+    );
+usage() if(!$result || !$start_lat || !$start_lon || !$distance_mi);
+
+main([$start_lat, $start_lon], $distance_mi);
+
+sub usage {
+    print "Usage: $0 --latitude 51.584483 --longitude -1.741585 --distance 1.75 (miles)\n";
+    exit;
+}
 
 sub earth {
   state $earth;
@@ -113,9 +129,10 @@ sub find_nearest_node {
 
 
 sub main {
+    my ($start_ll, $target_len) = @_;
     my $self = bless {}, __PACKAGE__;
-    my $start_ll = [51.584483, -1.741585];
-    my $target_len = 1.75;
+#    my $start_ll = [51.584483, -1.741585];
+#    my $target_len = 1.75;
     $self->get_region($start_ll, $target_len);
 
     my $start = $self->find_nearest_node($start_ll);
@@ -233,4 +250,3 @@ END
 
 }
 
-main();
