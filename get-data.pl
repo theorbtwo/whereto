@@ -8,16 +8,38 @@ use LWP::Simple 'get';
 use Geo::Parse::OSM::Multipass;
 use Getopt::Long;
 use Data::Dump::Streamer 'Dump', 'Dumper';
+use Imager;
 
 ## Setup, params:
-my ($start_lat, $start_lon, $distance_mi, $start_ll); 
+my ($start_lat, $start_lon, $distance_mi, $start_ll, $circle_kml_fn, $allpoints_tsv_fn);
 my $result = GetOptions("latitude=s" => \$start_lat,
                         "longitude=s" => \$start_lon,
                         "distance=s" => \$distance_mi,
-    );
-usage() if(!$result || !$start_lat || !$start_lon || !$distance_mi);
+                        "circle_kml:s" => \$circle_kml_fn,
+                        "allpoints_tsv:s" => \$allpoints_tsv_fn
+                       );
+usage() if(!$start_lat || !$start_lon || !$distance_mi || !($circle_kml_fn || $allpoints_tsv_fn));
+#51.58347,-1.77309
 
-main([$start_lat, $start_lon], $distance_mi);
+my $self = bless {}, __PACKAGE__;
+$self->main([$start_lat, $start_lon], $distance_mi);
+if ($circle_kml_fn) {
+  $self->write_kml([$start_lat, $start_lon], $circle_kml_fn);
+}
+if ($allpoints_tsv_fn) {
+  $self->write_tsv($allpoints_tsv_fn);
+}
+
+sub write_tsv {
+  my ($self, $fn) = @_;
+  
+  open my $fh, ">", $fn;
+
+  print $fh join("\t", qw<lat lon title>), "\n";
+  for my $path (sort {$a->{pathlen} <=> $b->{pathlen}} values %{$self->{seen}}) {
+    printf $fh "%f\t%f\t%f\n", $path->{path}[-1]{lat}, $path->{path}[-1]{lon}, $path->{pathlen};
+  }
+}
 
 sub usage {
     print "Usage: $0 --latitude 51.584483 --longitude -1.741585 --distance 1.75 (miles)\n";
@@ -116,6 +138,8 @@ sub find_nearest_node {
 
   my ($best_dist, $best_node) = (9e999, undef);
   for my $node (values %{$self->{nodes}}) {
+    # Skip nodes that have no links -- these are PoIs, not bits of a way that we can travel on.
+    next if !$node->{links} or !@{$node->{links}};
     my $dist = $earth->range(@$ll, $node->{lat}, $node->{lon});
     if ($best_dist > $dist) {
       $best_dist = $dist;
@@ -129,8 +153,7 @@ sub find_nearest_node {
 
 
 sub main {
-    my ($start_ll, $target_len) = @_;
-    my $self = bless {}, __PACKAGE__;
+    my ($self, $start_ll, $target_len, $filename) = @_;
 #    my $start_ll = [51.584483, -1.741585];
 #    my $target_len = 1.75;
     $self->get_region($start_ll, $target_len);
@@ -159,13 +182,13 @@ sub main {
         print $this_path->{pathlen}, ": ", join(", ", map {$_->{id}} @{$this_path->{path}}), "\n";
 
         if (exists $seen{$here->{id}}) {
-            if ($seen{$here->{id}} > $this_path->{pathlen}) {
+            if ($seen{$here->{id}}{pathlen} > $this_path->{pathlen}) {
                 print "Hmm, found a shorter path later?  Shouldn't happen.\n";
             }
             next;
         }
 
-        $seen{$here->{id}} = $this_path->{pathlen};
+        $seen{$here->{id}} = $this_path;
 
         if ($this_path->{pathlen} > $longest_path->{pathlen}) {
             $longest_path = $this_path;
@@ -184,7 +207,7 @@ sub main {
 
             # Exit condition: stop paths when they get longer then a mile.
             if ($new_path->{pathlen} >= $target_len) {
-                Dump $new_path;
+                #Dump $new_path;
                 push @terminals, $new_node;
                 #print "Found path over a mile:\n";
                 #print Dumper $new_path;
@@ -202,13 +225,16 @@ sub main {
 #print "Longest path found: \n";
 #print Dumper $longest_path;
 
-    $self->write_kml($start_ll, \@terminals);
+    $self->{terminals} = \@terminals;
+    $self->{seen} = \%seen;
 }
 
 sub write_kml {
-    my ($self, $start_ll, $terminals) = @_;
+    my ($self, $start_ll, $terminals, $filename) = @_;
 
-    open my $kml_out, ">foo.kml";
+    $terminals = $self->terminals;
+
+    open my $kml_out, '>', $filename;
 
     print $kml_out <<"END";
 <?xml version="1.0" encoding="UTF-8"?>
