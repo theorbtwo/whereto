@@ -23,27 +23,13 @@ usage() if(!$start_lat || !$start_lon || !$distance_mi || !($circle_kml_fn || $a
 
 my $self = bless {}, __PACKAGE__;
 $self->main([$start_lat, $start_lon], $distance_mi);
+
 if ($circle_kml_fn) {
   $self->write_kml([$start_lat, $start_lon], $circle_kml_fn);
 }
+
 if ($allpoints_tsv_fn) {
   $self->write_tsv($allpoints_tsv_fn);
-}
-
-sub write_tsv {
-  my ($self, $fn) = @_;
-  
-  open my $fh, ">", $fn;
-
-  print $fh join("\t", qw<lat lon title>), "\n";
-  for my $path (sort {$a->{pathlen} <=> $b->{pathlen}} values %{$self->{seen}}) {
-    printf $fh "%f\t%f\t%f\n", $path->{path}[-1]{lat}, $path->{path}[-1]{lon}, $path->{pathlen};
-  }
-}
-
-sub usage {
-    print "Usage: $0 --latitude 51.584483 --longitude -1.741585 --distance 1.75 (miles)\n";
-    exit;
 }
 
 sub earth {
@@ -57,8 +43,75 @@ sub earth {
                                  bearing => 1,
                                 );
   }
-
+  
   return $earth;
+}
+
+sub write_tsv {
+  my ($self, $fn) = @_;
+  
+  my $earth = $self->earth;
+
+  open my $fh, ">", $fn;
+  
+  print $fh join("\t", qw<lat lon title description>), "\n";
+  for my $path (sort {$a->{pathlen} <=> $b->{pathlen}} values %{$self->{seen}}) {
+    my $end_node = $path->{path}[-1]{node};
+    
+    my $desc;
+    my $prev_node;
+    my $prev_way;
+    for my $pathelem (@{$path->{path}}) {
+      if (not defined $pathelem->{way}) {
+        # The initial point
+        $desc .= "START<br/>";
+      } else {
+        my $bearing = $earth->bearing($prev_node->{lat}, $prev_node->{lon},
+                                      $pathelem->{node}{lat}, $pathelem->{node}{lon});
+        my $bearing_word;
+
+        if ($bearing < -135) {
+          $bearing_word = 'south';
+        } elsif ($bearing < -45) {
+          $bearing_word = 'west';
+        } elsif ($bearing < 45) {
+          $bearing_word = 'north';
+        } elsif ($bearing < 135) {
+          $bearing_word = 'east';
+        } else {
+          $bearing_word = 'south';
+        }
+
+        my $waydesc;
+        if ($pathelem->{way}{tag}{highway} and not $pathelem->{way}{tag}{name}) {
+          $waydesc = 'a footway';
+        } elsif (exists $pathelem->{way}{tag}{name}) {
+          $waydesc = $pathelem->{way}{tag}{name};
+        } elsif (($pathelem->{way}{tag}{amenity} || 'x') eq 'parking') {
+          $waydesc = 'a parking lot';
+        } elsif (not keys %{$pathelem->{way}{tag}}) {
+          $waydesc = '???';
+        } elsif (($pathelem->{way}{tag}{railway} || "x") eq 'disused') {
+          $waydesc = 'a disused rail track';
+        } else {
+          Dump $pathelem;
+          die;
+        }
+
+        $desc .= "go $bearing_word on $waydesc<br/>";
+      }
+
+      $prev_node = $pathelem->{node};
+      $prev_way = $pathelem->{way};
+    }
+    
+    print $fh join("\t", $end_node->{lat}, $end_node->{lon}, $path->{pathlen}, $desc), "\n";
+  }
+}
+
+sub usage {
+  print "Usage: $0 --latitude 51.584483 --longitude -1.741585 --distance 1.75 (miles)\n";
+  exit;
 }
 
 sub get_region {
@@ -80,7 +133,9 @@ sub get_region {
   print "Fetching $url\n";
 
   my $xml = get($url);
-  print $xml, "\n\n";
+  #print $xml, "\n\n";
+
+  #my $xml = 'map?bbox=-1.77032811520983,51.5665801990025,-1.71286446285378,51.6023787132927';
 
   my $parser = Geo::Parse::OSM::Multipass->new(\$xml,
                                                pass2 => sub {$self->pass2(@_)},
@@ -164,7 +219,10 @@ sub main {
 
     my $earth = $self->earth;
     my @frontier = (
-        {path => [$start],
+        {path => [{
+                   node => $start,
+                   way => undef,
+                  }],
          # Length, in miles, of the current path.
          pathlen => 0
         }
@@ -177,9 +235,9 @@ sub main {
         # Would using min_index from List::Utils be more efficent?  Quite possibly, or use an insertion sort when adding new nodes.
         @frontier = sort {$a->{pathlen} <=> $b->{pathlen}} @frontier;
         my $this_path = shift @frontier;
-        my $here = $this_path->{path}[-1];
+        my $here = $this_path->{path}[-1]{node};
 
-        print $this_path->{pathlen}, ": ", join(", ", map {$_->{id}} @{$this_path->{path}}), "\n";
+        #print $this_path->{pathlen}, ": ", join(", ", map {$_->{node}{id}} @{$this_path->{path}}), "\n";
 
         if (exists $seen{$here->{id}}) {
             if ($seen{$here->{id}}{pathlen} > $this_path->{pathlen}) {
@@ -196,13 +254,27 @@ sub main {
 
         for my $link (@{$here->{links}}) {
             #Dump $link;
-            next if $link->[0]{tag}{highway} and $link->[0]{tag}{highway} ~~ ['trunk', 'trunk_link'];
+            next if ($link->[0]{tag}{highway}||'x') ~~ ['trunk', 'trunk_link'];
+            next if ($link->[0]{tag}{barrier}||'x') ~~ ['hedge'];
+
+            # I'd like to exclude all areas, but there's not really a good mechanical way to do that presently.
+            # All valid areas will have a $link->[0]{outer}, but that's also true of any circular feature -- such as a roundabout.
+            next if $link->[0]{tag}{amenity};
+            next if $link->[0]{tag}{landuse};
+            next if (($link->[0]{tag}{leisure}||'x') eq 'park');
+            next if $link->[0]{tag}{building};
 
             my $new_node = $self->{nodes}{$link->[1]};
+            my $new_path_elem = { node => $new_node,
+                                  way  => $link->[0]
+                                };
             my $new_len = $earth->range($here->{lat}, $here->{lon}, $new_node->{lat}, $new_node->{lon});
             my $new_path = {
-                path => [ @{$this_path->{path}}, $new_node ],
-                pathlen => $this_path->{pathlen} + $new_len
+                            path => [
+                                     @{$this_path->{path}},
+                                     $new_path_elem
+                                    ],
+                            pathlen => $this_path->{pathlen} + $new_len
             };
 
             # Exit condition: stop paths when they get longer then a mile.
