@@ -32,6 +32,55 @@ if ($allpoints_tsv_fn) {
   $self->write_tsv($allpoints_tsv_fn);
 }
 
+sub filter_node {
+  my ($self, $node) = @_;
+  
+  #print "Filtering node: $node\n";
+  #Dump $node;
+
+  # No links -- it's a PoI, not a part of a way.
+  return 0 if !$node->{links} or !@{$node->{links}};
+
+  # If any of the potential links are something that we can walk on, keep the node.
+  for my $link (@{$node->{links}}) {
+    return 1 if $self->filter_link($link);
+  }
+
+  return 0;
+}
+
+sub filter_link {
+  my ($self, $link) = @_;
+
+  return 1 if (($link->[0]{tag}{foot}||'x') ~~ [qw<yes>]);
+
+  return 0 if $link->[0]{tag}{proposed};
+
+  #print "Filtering link:\n";
+  #print "From ", join(" // ", map {$_//"undef"} caller(0)), "\n";
+  #Dump $link;
+  # Big roads that you shouldn't walk on.
+  return 0 if ($link->[0]{tag}{highway}||'x') ~~ ['trunk', 'trunk_link'];
+  
+  # Things that you can't walk through.
+  return 0 if ($link->[0]{tag}{barrier}||'x') ~~ ['hedge', 'wall'];
+  if ($link->[0]{tag}{barrier}) {
+    print "Barrier: ", $link->[0]{tag}{barrier}, "\n";
+  }
+  
+  return 0 if (($link->[0]{tag}{railway}||'x') ~~ [qw<rail platform>]);
+
+  # I'd like to exclude all areas, but there's not really a good mechanical way to do that presently.
+  # All valid areas will have a $link->[0]{outer}, but that's also true of any circular feature -- such as a roundabout.
+  return 0 if $link->[0]{tag}{amenity};
+  return 0 if $link->[0]{tag}{landuse};
+  return 0 if (($link->[0]{tag}{leisure}||'x') ~~ [qw<park playground pitch>]);
+  return 0 if $link->[0]{tag}{building};
+  return 0 if $link->[0]{tag}{boundary};
+
+  return 1;
+}
+
 sub earth {
   state $earth;
   if (!$earth) {
@@ -83,19 +132,59 @@ sub write_tsv {
         }
 
         my $waydesc;
-        if ($pathelem->{way}{tag}{highway} and not $pathelem->{way}{tag}{name}) {
-          $waydesc = 'a footway';
-        } elsif (exists $pathelem->{way}{tag}{name}) {
+        my $highway = $pathelem->{way}{tag}{highway} // 'undef';
+
+        if (exists $pathelem->{way}{tag}{name}) {
           $waydesc = $pathelem->{way}{tag}{name};
+        } elsif ($pathelem->{way}{tag}{ref}) {
+          $waydesc = 'the '.$pathelem->{way}{tag}{ref};
+        } elsif (($pathelem->{way}{tag}{junction}||'x') eq 'roundabout') {
+          $waydesc = 'the roundabout';
+        } elsif ($highway eq 'path') {
+          $waydesc = 'a generic path';
+        } elsif ($highway eq 'primary') {
+          $waydesc = 'a major road';
+        } elsif ($highway eq 'primary_link') {
+          $waydesc = 'the link to a major road';
+        } elsif ($highway eq 'steps') {
+          $waydesc = 'some stairs';
+        } elsif ($highway eq 'secondary') {
+          $waydesc = 'a midsized road';
+        } elsif ($highway eq 'tertiary_link') {
+          $waydesc = 'the link to a small road';
+        } elsif ($highway eq 'tertiary') {
+          $waydesc = 'a small road';
+        } elsif ($highway eq 'unclassified') {
+          $waydesc = 'a tiny road';
+        } elsif ($highway eq 'track') {
+          $waydesc = 'a track';
+        } elsif ($highway eq 'residential') {
+          $waydesc = 'a residential street';
+        } elsif ($highway eq 'cycleway') {
+          $waydesc = 'a cycle path';
+        } elsif ($highway eq 'service') {
+          $waydesc = 'an access road';
+        } elsif ($highway eq 'road') {
+          $waydesc = "some sort of road";
         } elsif (($pathelem->{way}{tag}{amenity} || 'x') eq 'parking') {
           $waydesc = 'a parking lot';
         } elsif (not keys %{$pathelem->{way}{tag}}) {
           $waydesc = '???';
         } elsif (($pathelem->{way}{tag}{railway} || "x") eq 'disused') {
           $waydesc = 'a disused rail track';
+        } elsif (($pathelem->{way}{tag}{waterway}||'x') eq 'river') {
+          $waydesc = 'a river';
+        } elsif (($pathelem->{way}{tag}{waterway}||'x') eq 'stream') {
+          $waydesc = 'a stream';
+        } elsif ($highway eq 'footway') {
+          $waydesc = 'a footpath';
         } else {
           Dump $pathelem;
-          die;
+          die "Don't know how to describe this way";
+        }
+
+        if ($pathelem->{way}{tag}{bridge}) {
+          $waydesc .= " bridge";
         }
 
         $desc .= "go $bearing_word on $waydesc<br/>";
@@ -193,8 +282,8 @@ sub find_nearest_node {
 
   my ($best_dist, $best_node) = (9e999, undef);
   for my $node (values %{$self->{nodes}}) {
-    # Skip nodes that have no links -- these are PoIs, not bits of a way that we can travel on.
-    next if !$node->{links} or !@{$node->{links}};
+    next if !$self->filter_node($node);
+
     my $dist = $earth->range(@$ll, $node->{lat}, $node->{lon});
     if ($best_dist > $dist) {
       $best_dist = $dist;
@@ -253,20 +342,13 @@ sub main {
         }
 
         for my $link (@{$here->{links}}) {
-            #Dump $link;
-            next if ($link->[0]{tag}{highway}||'x') ~~ ['trunk', 'trunk_link'];
-            next if ($link->[0]{tag}{barrier}||'x') ~~ ['hedge'];
-
-            # I'd like to exclude all areas, but there's not really a good mechanical way to do that presently.
-            # All valid areas will have a $link->[0]{outer}, but that's also true of any circular feature -- such as a roundabout.
-            next if $link->[0]{tag}{amenity};
-            next if $link->[0]{tag}{landuse};
-            next if (($link->[0]{tag}{leisure}||'x') eq 'park');
-            next if $link->[0]{tag}{building};
+            next unless $self->filter_link($link);
 
             my $new_node = $self->{nodes}{$link->[1]};
-            my $new_path_elem = { node => $new_node,
-                                  way  => $link->[0]
+
+            my $new_path_elem = {
+                                 node => $new_node,
+                                 way  => $link->[0]
                                 };
             my $new_len = $earth->range($here->{lat}, $here->{lon}, $new_node->{lat}, $new_node->{lon});
             my $new_path = {
