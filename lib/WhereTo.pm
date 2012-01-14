@@ -1,5 +1,5 @@
-#!/usr/bin/perl
-$|=1;
+package WhereTo;
+
 use strictures 1;
 use autodie;
 use 5.10.0;
@@ -10,27 +10,152 @@ use Getopt::Long;
 use Data::Dump::Streamer 'Dump', 'Dumper';
 # use Imager;
 
-## Setup, params:
-my ($start_lat, $start_lon, $distance_mi, $start_ll, $circle_kml_fn, $allpoints_tsv_fn);
-my $result = GetOptions("latitude=s" => \$start_lat,
-                        "longitude=s" => \$start_lon,
-                        "distance=s" => \$distance_mi,
-                        "circle_kml:s" => \$circle_kml_fn,
-                        "allpoints_tsv:s" => \$allpoints_tsv_fn
-                       );
-usage() if(!$start_lat || !$start_lon || !$distance_mi || !($circle_kml_fn || $allpoints_tsv_fn));
-#51.58347,-1.77309
+use Moose;
 
-my $self = bless {}, __PACKAGE__;
-$self->main([$start_lat, $start_lon], $distance_mi);
+## TODO:
+# Add attributes for: nodes, earth, terminals, seen ?
+# Refactoring: Methods return results instead of stuffing into $self, add methods to get various parts of data that can be abstracted to data storage, 
+# Extract method for prettifying directions
 
-if ($circle_kml_fn) {
-  $self->write_kml([$start_lat, $start_lon], $circle_kml_fn);
+
+=head2 get_region
+
+=over
+
+=item Arguments: \($latitude, $longitude), $radius
+
+=item Returns: $osm_xml
+
+=back
+
+Pass in a starting point (arrayref of latitude and longitude of the
+center), and get back the OSM XML representing the area $radius miles
+around that point. (A square, not a circle).
+
+=cut
+
+sub get_region {
+  my ($self, $center, $radius) = @_;
+
+  my $earth = $self->earth;
+  my ($north, $west) = $earth->at(@$center, $radius, 315);
+  my ($south, $east) = $earth->at(@$center, $radius, 135);
+
+  $self->debugf ("North:  %f\n", $north);
+  $self->debugf ("Center: %f\n", $center->[0]);
+  $self->debugf ("South:  %f\n", $south);
+
+  $self->debugf ("West:   %f\n", $west);
+  $self->debugf ("Center: %f\n", $center->[1]);
+  $self->debugf ("East:   %f\n", $east);
+
+  ## Wot no CPAN module for this?
+  my $url = 'http://api.openstreetmap.org/api/0.6/map?bbox='.join(',', $west, $south, $east, $north);
+  $self->debug( "Fetching $url\n" );
+
+  my $xml = get($url);
+  #print $xml, "\n\n";
+
+  #my $xml = 'map?bbox=-1.77032811520983,51.5665801990025,-1.71286446285378,51.6023787132927';
+
+  return $xml;
 }
 
-if ($allpoints_tsv_fn) {
-  $self->write_tsv($allpoints_tsv_fn);
+=head2 parse_osm_xml
+
+=over
+
+=item Arguments: $osm_xml
+
+=item Returns: $self (and runs the osm_handler callback for each data bit)
+
+=back
+
+Pass in the OSM XML for an area of map, this method uses
+L<Geo::Parse::OSM::Multipass> to iterate over the data and call the
+L</osm_handler> callback.
+
+=cut
+
+sub parse_osm_xml {
+  my ($self, $xml) = @_;
+
+  my $parser = Geo::Parse::OSM::Multipass->new(\$xml,
+                                               pass2 => sub {$self->osm_handler(@_)},                                             );
+
+  $parser->parse(sub {});
+
+  return $self;
 }
+
+=head2 osm_handler
+
+=over
+
+=item Arguments: \%bit, $parser
+
+=item Returns: Nothing (stores the nodes and related ways in $self->{nodes})
+
+=back
+
+Called by the L</parse_osm_xml> method as a callback to
+L<Geo::Parse::OSM::Multipass>'s parser. Stores all the nodes and their
+attached ways in $self->{nodes}.
+
+=cut
+
+sub osm_handler {
+  my ($self, $bit, $parser) = @_;
+
+  $bit = {%$bit};
+
+  #Dump $bit;
+
+  given ($bit->{type}) {
+    when ('bound') {
+      push @{$self->{known}}, $bit;
+    };
+
+    when ('node') {
+      $self->{nodes}{$bit->{id}} = $bit;
+    };
+
+    when ('way') {
+      my @nodes = @{$bit->{chain}};
+
+      for my $i (0..@nodes-1) {
+        my $prev_id = $i>0 ? $nodes[$i-1] : undef;
+        my $this_id = $nodes[$i];
+        my $next_id = $i<@nodes-1 ? $nodes[$i+1] : undef;
+
+        push @{$self->{nodes}{$this_id}{links}}, [$bit, $prev_id] if $prev_id;
+        push @{$self->{nodes}{$this_id}{links}}, [$bit, $next_id] if $next_id;
+      }
+    };
+
+    when ('relation') {
+      # Do nothing?
+    }
+
+    default {
+      Dump $bit;
+      die "Don't know how to deal with osm bit";
+    };
+  }
+}
+
+=head2 filter_node
+
+=item Arguments: $node
+
+=item Returns: True value if this node is on a linked way, False if not
+
+=back
+
+Discovers whether the given node is part of a way that is also
+walkable (filtered by L</filter_link>.
+
+=cut
 
 sub filter_node {
   my ($self, $node) = @_;
@@ -49,6 +174,21 @@ sub filter_node {
   return 0;
 }
 
+=head2 filter_link
+
+=over
+
+=item Arguments: $link
+
+=item Returns: True if the link is walkable, False otherwise
+
+=back
+
+Discover whether a given link (part of a way) is actually walkable,
+that is not part of a boundary, river etc. See L<http://wiki.openstreetmap.org/wiki/Map_Features>.
+
+=cut
+
 sub filter_link {
   my ($self, $link) = @_;
 
@@ -65,7 +205,7 @@ sub filter_link {
   # Things that you can't walk through.
   return 0 if ($link->[0]{tag}{barrier}||'x') ~~ ['hedge', 'wall'];
   if ($link->[0]{tag}{barrier}) {
-    print "Barrier: ", $link->[0]{tag}{barrier}, "\n";
+    $self->debug("Barrier: ", $link->[0]{tag}{barrier}, "\n" );
   }
   
   return 0 if (($link->[0]{tag}{railway}||'x') ~~ [qw<rail platform>]);
@@ -81,6 +221,56 @@ sub filter_link {
   return 1;
 }
 
+=head2
+
+=over
+
+=item Arguments: \($latitude, $longitude)
+
+=item Returns: Actual closest OSM node that is also on a Way.
+
+=back
+
+Given a point defined by a lat/long, find the closest OSM node that is
+part of a (walkable) way.
+
+=cut
+
+sub find_nearest_node {
+  my ($self, $ll) = @_;
+
+  my $earth = $self->earth;
+
+  my ($best_dist, $best_node) = (9e999, undef);
+  for my $node (values %{$self->{nodes}}) {
+    next if !$self->filter_node($node);
+
+    my $dist = $earth->range(@$ll, $node->{lat}, $node->{lon});
+    if ($best_dist > $dist) {
+      $best_dist = $dist;
+      $best_node = $node;
+    }
+  }
+
+  $self->debug("find_nearest_node: best node was $best_dist miles away\n" );
+  return $best_node;
+}
+
+=head2
+
+=over
+
+=item Arguments: None
+
+=item Returns: Geo::Ellipsoid object represnting the earth
+
+=back
+
+Main object for calculating distances and new coordinates.
+
+=cut
+
+
 sub earth {
   state $earth;
   if (!$earth) {
@@ -95,6 +285,25 @@ sub earth {
   
   return $earth;
 }
+
+=head2
+
+=over
+
+=item Arguments: $filehandle
+
+=item Returns: Nothing
+
+=back
+
+Writes a tab separated set of data representing all the nodes that can
+be reached from the start point, and directions to reach them, to the
+given filehandle.
+
+This is in a format that the OpenLayers Text Format will read.
+
+=cut
+
 
 sub write_tsv {
   my ($self, $fn) = @_;
@@ -198,109 +407,90 @@ sub write_tsv {
   }
 }
 
-sub usage {
-  print "Usage: $0 --latitude 51.584483 --longitude -1.741585 --distance 1.75 (miles)\n";
-  exit;
+=head2 write_kml
+
+=over
+
+=item Arguemnts: \($startlat, $startlon), $terminal_nodes, $filename
+
+=item Returns: Nothing, writes to the filename
+
+=back
+
+Writes out KML data representing the nodes reached from the start point.
+
+=cut
+
+sub write_kml {
+    my ($self, $start_ll, $terminals, $filename) = @_;
+
+    $terminals = $self->terminals;
+
+    open my $kml_out, '>', $filename;
+
+    print $kml_out <<"END";
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Paths</name>
+    <Style id="yellowLineGreenPoly">
+      <LineStyle>
+        <color>99ffac59</color>
+        <width>4</width>
+      </LineStyle>
+      <PolyStyle>
+        <color>99ffac59</color>
+      </PolyStyle>
+    </Style>
+    <Placemark>
+      <name>Absolute Extruded</name>
+      <description>Transparent green wall with yellow outlines</description>
+      <styleUrl>#yellowLineGreenPoly</styleUrl>
+      <LineString>
+        <extrude>1</extrude>
+        <tessellate>1</tessellate>
+        <altitudeMode>clampToGround</altitudeMode>
+        <coordinates>
+END
+
+#for my $node (@{$longest_path->{path}}) {
+for my $node (sort {($self->earth->bearing(@{$start_ll}, $a->{lat}, $a->{lon})) <=> ($self->earth->bearing(@{$start_ll}, $b->{lat}, $b->{lon}))} @$terminals) {
+  printf $kml_out "%f,%f,0\n", $node->{lon}, $node->{lat};
 }
 
-sub get_region {
-  my ($self, $center, $radius) = @_;
+    print $kml_out <<"END";
+        </coordinates>
+      </LineString>
+    </Placemark>
+  </Document>
+</kml>
+END
 
-  my $earth = $self->earth;
-  my ($north, $west) = $earth->at(@$center, $radius, 315);
-  my ($south, $east) = $earth->at(@$center, $radius, 135);
-
-  printf "North:  %f\n", $north;
-  printf "Center: %f\n", $center->[0];
-  printf "South:  %f\n", $south;
-
-  printf "West:   %f\n", $west;
-  printf "Center: %f\n", $center->[1];
-  printf "East:   %f\n", $east;
-
-  my $url = 'http://api.openstreetmap.org/api/0.6/map?bbox='.join(',', $west, $south, $east, $north);
-  print "Fetching $url\n";
-
-  my $xml = get($url);
-  #print $xml, "\n\n";
-
-  #my $xml = 'map?bbox=-1.77032811520983,51.5665801990025,-1.71286446285378,51.6023787132927';
-
-  my $parser = Geo::Parse::OSM::Multipass->new(\$xml,
-                                               pass2 => sub {$self->pass2(@_)},
-                                              );
-
-  $parser->parse(sub {});
-
-  return $self;
 }
 
-sub pass2 {
-  my ($self, $bit, $parser) = @_;
+=head2 calculate_paths
 
-  $bit = {%$bit};
+=over
 
-  #Dump $bit;
+=item Arguments: \($startlat, $startlon), $distmiles, $filename
 
-  given ($bit->{type}) {
-    when ('bound') {
-      push @{$self->{known}}, $bit;
-    };
+=over Returns: Nothin, stuffs results into $self->{terminals}, $self->{seen}
 
-    when ('node') {
-      $self->{nodes}{$bit->{id}} = $bit;
-    };
+=back
 
-    when ('way') {
-      my @nodes = @{$bit->{chain}};
+Given a starting point (in lat/long), calculates all the paths to
+nodes that are at most $distmiles away from the starting point. Stores
+the results in $self->{terminals} and $self->{seen}.
 
-      for my $i (0..@nodes-1) {
-        my $prev_id = $i>0 ? $nodes[$i-1] : undef;
-        my $this_id = $nodes[$i];
-        my $next_id = $i<@nodes-1 ? $nodes[$i+1] : undef;
-
-        push @{$self->{nodes}{$this_id}{links}}, [$bit, $prev_id] if $prev_id;
-        push @{$self->{nodes}{$this_id}{links}}, [$bit, $next_id] if $next_id;
-      }
-    };
-
-    when ('relation') {
-      # Do nothing?
-    }
-
-    default {
-      Dump $bit;
-      die "Don't know how to deal with osm bit";
-    };
-  }
-}
-
-sub find_nearest_node {
-  my ($self, $ll) = @_;
-
-  my $earth = $self->earth;
-
-  my ($best_dist, $best_node) = (9e999, undef);
-  for my $node (values %{$self->{nodes}}) {
-    next if !$self->filter_node($node);
-
-    my $dist = $earth->range(@$ll, $node->{lat}, $node->{lon});
-    if ($best_dist > $dist) {
-      $best_dist = $dist;
-      $best_node = $node;
-    }
-  }
-
-  print "find_nearest_node: best node was $best_dist miles away\n";
-  return $best_node;
-}
+=cut
 
 
-sub main {
+sub calculate_paths {
     my ($self, $start_ll, $target_len, $filename) = @_;
 #    my $start_ll = [51.584483, -1.741585];
 #    my $target_len = 1.75;
-    $self->get_region($start_ll, $target_len);
+    my $osm_xml = $self->get_region($start_ll, $target_len);
+    $self->parse_osm_xml($osm_xml);
 
     my $start = $self->find_nearest_node($start_ll);
     Dump $start;
@@ -330,7 +520,7 @@ sub main {
 
         if (exists $seen{$here->{id}}) {
             if ($seen{$here->{id}}{pathlen} > $this_path->{pathlen}) {
-                print "Hmm, found a shorter path later?  Shouldn't happen.\n";
+                $self->debug( "Hmm, found a shorter path later?  Shouldn't happen.\n");
             }
             next;
         }
@@ -383,50 +573,22 @@ sub main {
     $self->{seen} = \%seen;
 }
 
-sub write_kml {
-    my ($self, $start_ll, $terminals, $filename) = @_;
+sub debugf {
+    my ($self, @content) = @_;
 
-    $terminals = $self->terminals;
-
-    open my $kml_out, '>', $filename;
-
-    print $kml_out <<"END";
-<?xml version="1.0" encoding="UTF-8"?>
-<kml xmlns="http://www.opengis.net/kml/2.2">
-  <Document>
-    <name>Paths</name>
-    <Style id="yellowLineGreenPoly">
-      <LineStyle>
-        <color>99ffac59</color>
-        <width>4</width>
-      </LineStyle>
-      <PolyStyle>
-        <color>99ffac59</color>
-      </PolyStyle>
-    </Style>
-    <Placemark>
-      <name>Absolute Extruded</name>
-      <description>Transparent green wall with yellow outlines</description>
-      <styleUrl>#yellowLineGreenPoly</styleUrl>
-      <LineString>
-        <extrude>1</extrude>
-        <tessellate>1</tessellate>
-        <altitudeMode>clampToGround</altitudeMode>
-        <coordinates>
-END
-
-#for my $node (@{$longest_path->{path}}) {
-for my $node (sort {($self->earth->bearing(@{$start_ll}, $a->{lat}, $a->{lon})) <=> ($self->earth->bearing(@{$start_ll}, $b->{lat}, $b->{lon}))} @$terminals) {
-  printf $kml_out "%f,%f,0\n", $node->{lon}, $node->{lat};
+    printf STDERR @content;
 }
 
-    print $kml_out <<"END";
-        </coordinates>
-      </LineString>
-    </Placemark>
-  </Document>
-</kml>
-END
+sub debug {
+    my ($self, @content) = @_;
 
+    print STDERR @content;
 }
 
+'Found it!';
+
+=head1 GLOSSARY
+
+=head2 node
+
+=head2 link

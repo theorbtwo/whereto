@@ -12,6 +12,8 @@ requires 'Geo::Ellipsoid';
 requires 'LWP::Simple';
 requires 'Geo::Parse::OSM::Multipass';
 requires 'Data::Dump::Streamer';
+requires 'Getopt::Long';
+requires 'Moose';
 
 author 'James Mastros <james@mastros.biz>';
 license 'perl';
