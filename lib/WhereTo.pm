@@ -8,9 +8,22 @@ use LWP::Simple 'get';
 use Geo::Parse::OSM::Multipass;
 use Getopt::Long;
 use Data::Dump::Streamer 'Dump', 'Dumper';
+use Moose;
+use JSON;
 # use Imager;
 
-use Moose;
+use WhereTo::Schema;
+
+has schema => (is => 'ro', isa => 'DBIx::Class::Schema', lazy_build => 1);
+
+sub _build_schema {
+    return WhereTo::Schema->connect('dbi:SQLite:/mnt/shared/projects/geo/osm/whereto/whereto.db');
+}
+
+sub nodes {
+    my ($self) = @_;
+    return $self->schema->resultset('Node')->all();
+}
 
 ## TODO:
 # Add attributes for: nodes, earth, terminals, seen ?
@@ -30,7 +43,8 @@ use Moose;
 
 Pass in a starting point (arrayref of latitude and longitude of the
 center), and get back the OSM XML representing the area $radius miles
-around that point. (A square, not a circle).
+around that point. (The square circumscribing the circle, since the
+OSM API call takes a bounding box.)
 
 =cut
 
@@ -38,8 +52,10 @@ sub get_region {
   my ($self, $center, $radius) = @_;
 
   my $earth = $self->earth;
-  my ($north, $west) = $earth->at(@$center, $radius, 315);
-  my ($south, $east) = $earth->at(@$center, $radius, 135);
+  (my $north, undef) = $earth->at(@$center, $radius, 0);
+  (undef, my $east)  = $earth->at(@$center, $radius, 90);
+  (my $south, undef) = $earth->at(@$center, $radius, 180);
+  (undef, my $west)  = $earth->at(@$center, $radius, 180);
 
   $self->debugf ("North:  %f\n", $north);
   $self->debugf ("Center: %f\n", $center->[0]);
@@ -117,20 +133,12 @@ sub osm_handler {
     };
 
     when ('node') {
-      $self->{nodes}{$bit->{id}} = $bit;
+#      $self->{nodes}{$bit->{id}} = $bit;
+        $self->add_node($bit);
     };
 
     when ('way') {
-      my @nodes = @{$bit->{chain}};
-
-      for my $i (0..@nodes-1) {
-        my $prev_id = $i>0 ? $nodes[$i-1] : undef;
-        my $this_id = $nodes[$i];
-        my $next_id = $i<@nodes-1 ? $nodes[$i+1] : undef;
-
-        push @{$self->{nodes}{$this_id}{links}}, [$bit, $prev_id] if $prev_id;
-        push @{$self->{nodes}{$this_id}{links}}, [$bit, $next_id] if $next_id;
-      }
+      $self->add_way($bit);
     };
 
     when ('relation') {
@@ -142,6 +150,48 @@ sub osm_handler {
       die "Don't know how to deal with osm bit";
     };
   }
+}
+
+sub add_node {
+    my ($self, $bit) = @_;
+
+    my $tags = $bit->{tag} ? JSON::encode_json($bit->{tag}) : undef;
+    $self->schema->resultset('Node')->find_or_create({
+        id => $bit->{id},
+        latitude => $bit->{lat},
+        longitude => $bit->{lon},
+        uid => $bit->{uid},
+        tags => $tags,
+    }, { key => 'primary'});
+
+#    $self->{nodes}{$bit->{id}} = $bit;
+}
+
+sub add_way {
+    my ($self, $bit) = @_;
+
+    my $tags = $bit->{tag} ? JSON::encode_json($bit->{tag}) : undef;
+    my $way = $self->schema->resultset('Way')->find_or_create({
+        id => $bit->{id},
+        uid => $bit->{uid},
+        tags => $tags,
+    });
+
+    foreach my $node (@{$bit->{chain}}) {
+#        $self->debug("New chain: $node, ". $bit->{id}. "\n");
+        my $chain = $way->find_or_create_related('chains', { node_id => $node });
+    }
+
+    # my @nodes = @{$bit->{chain}};
+    
+    # for my $i (0..@nodes-1) {
+    #     my $prev_id = $i>0 ? $nodes[$i-1] : undef;
+    #     my $this_id = $nodes[$i];
+    #     my $next_id = $i<@nodes-1 ? $nodes[$i+1] : undef;
+        
+    #     push @{$self->{nodes}{$this_id}{links}}, [$bit, $prev_id] if $prev_id;
+    #     push @{$self->{nodes}{$this_id}{links}}, [$bit, $next_id] if $next_id;
+    # }
 }
 
 =head2 filter_node
@@ -164,10 +214,10 @@ sub filter_node {
   #Dump $node;
 
   # No links -- it's a PoI, not a part of a way.
-  return 0 if !$node->{links} or !@{$node->{links}};
+  return 0 if !$node->chains->count;
 
   # If any of the potential links are something that we can walk on, keep the node.
-  for my $link (@{$node->{links}}) {
+  for my $link (@{$node->links}) {
     return 1 if $self->filter_link($link);
   }
 
@@ -192,31 +242,33 @@ that is not part of a boundary, river etc. See L<http://wiki.openstreetmap.org/w
 sub filter_link {
   my ($self, $link) = @_;
 
-  return 1 if (($link->[0]{tag}{foot}||'x') ~~ [qw<yes>]);
+  return 0 if( !$link->[0]->tags );
 
-  return 0 if $link->[0]{tag}{proposed};
+  return 1 if (($link->[0]->tags->{foot}||'x') ~~ [qw<yes>]);
+
+  return 0 if $link->[0]->tags->{proposed};
 
   #print "Filtering link:\n";
   #print "From ", join(" // ", map {$_//"undef"} caller(0)), "\n";
   #Dump $link;
   # Big roads that you shouldn't walk on.
-  return 0 if ($link->[0]{tag}{highway}||'x') ~~ ['trunk', 'trunk_link'];
+  return 0 if ($link->[0]->tags->{highway}||'x') ~~ ['trunk', 'trunk_link'];
   
   # Things that you can't walk through.
-  return 0 if ($link->[0]{tag}{barrier}||'x') ~~ ['hedge', 'wall'];
-  if ($link->[0]{tag}{barrier}) {
-    $self->debug("Barrier: ", $link->[0]{tag}{barrier}, "\n" );
+  return 0 if ($link->[0]->tags->{barrier}||'x') ~~ ['hedge', 'wall'];
+  if ($link->[0]->tags->{barrier}) {
+    $self->debug("Barrier: ", $link->[0]->tags->{barrier}, "\n" );
   }
   
-  return 0 if (($link->[0]{tag}{railway}||'x') ~~ [qw<rail platform>]);
+  return 0 if (($link->[0]->tags->{railway}||'x') ~~ [qw<rail platform>]);
 
   # I'd like to exclude all areas, but there's not really a good mechanical way to do that presently.
   # All valid areas will have a $link->[0]{outer}, but that's also true of any circular feature -- such as a roundabout.
-  return 0 if $link->[0]{tag}{amenity};
-  return 0 if $link->[0]{tag}{landuse};
-  return 0 if (($link->[0]{tag}{leisure}||'x') ~~ [qw<park playground pitch>]);
-  return 0 if $link->[0]{tag}{building};
-  return 0 if $link->[0]{tag}{boundary};
+  return 0 if $link->[0]->tags->{amenity};
+  return 0 if $link->[0]->tags->{landuse};
+  return 0 if (($link->[0]->tags->{leisure}||'x') ~~ [qw<park playground pitch>]);
+  return 0 if $link->[0]->tags->{building};
+  return 0 if $link->[0]->tags->{boundary};
 
   return 1;
 }
@@ -242,10 +294,10 @@ sub find_nearest_node {
   my $earth = $self->earth;
 
   my ($best_dist, $best_node) = (9e999, undef);
-  for my $node (values %{$self->{nodes}}) {
+  for my $node ($self->nodes) {
     next if !$self->filter_node($node);
 
-    my $dist = $earth->range(@$ll, $node->{lat}, $node->{lon});
+    my $dist = $earth->range(@$ll, $node->latitude, $node->longitude);
     if ($best_dist > $dist) {
       $best_dist = $dist;
       $best_node = $node;
@@ -324,8 +376,10 @@ sub write_tsv {
         # The initial point
         $desc .= "START<br/>";
       } else {
-        my $bearing = $earth->bearing($prev_node->{lat}, $prev_node->{lon},
-                                      $pathelem->{node}{lat}, $pathelem->{node}{lon});
+        my $bearing = $earth->bearing($prev_node->latitude,
+                                      $prev_node->longitude,
+                                      $pathelem->{node}->latitude,
+                                      $pathelem->{node}->longitude);
         my $bearing_word;
 
         if ($bearing < -135) {
@@ -341,13 +395,13 @@ sub write_tsv {
         }
 
         my $waydesc;
-        my $highway = $pathelem->{way}{tag}{highway} // 'undef';
+        my $highway = $pathelem->{way}->tags->{highway} // 'undef';
 
-        if (exists $pathelem->{way}{tag}{name}) {
-          $waydesc = $pathelem->{way}{tag}{name};
-        } elsif ($pathelem->{way}{tag}{ref}) {
-          $waydesc = 'the '.$pathelem->{way}{tag}{ref};
-        } elsif (($pathelem->{way}{tag}{junction}||'x') eq 'roundabout') {
+        if (exists $pathelem->{way}->tags->{name}) {
+          $waydesc = $pathelem->{way}->tags->{name};
+        } elsif ($pathelem->{way}->tags->{ref}) {
+          $waydesc = 'the '.$pathelem->{way}->tags->{ref};
+        } elsif (($pathelem->{way}->tags->{junction}||'x') eq 'roundabout') {
           $waydesc = 'the roundabout';
         } elsif ($highway eq 'path') {
           $waydesc = 'a generic path';
@@ -375,15 +429,15 @@ sub write_tsv {
           $waydesc = 'an access road';
         } elsif ($highway eq 'road') {
           $waydesc = "some sort of road";
-        } elsif (($pathelem->{way}{tag}{amenity} || 'x') eq 'parking') {
+        } elsif (($pathelem->{way}->tags->{amenity} || 'x') eq 'parking') {
           $waydesc = 'a parking lot';
-        } elsif (not keys %{$pathelem->{way}{tag}}) {
+        } elsif (not keys %{$pathelem->{way}->tags}) {
           $waydesc = '???';
-        } elsif (($pathelem->{way}{tag}{railway} || "x") eq 'disused') {
+        } elsif (($pathelem->{way}->tags->{railway} || "x") eq 'disused') {
           $waydesc = 'a disused rail track';
-        } elsif (($pathelem->{way}{tag}{waterway}||'x') eq 'river') {
+        } elsif (($pathelem->{way}->tags->{waterway}||'x') eq 'river') {
           $waydesc = 'a river';
-        } elsif (($pathelem->{way}{tag}{waterway}||'x') eq 'stream') {
+        } elsif (($pathelem->{way}->tags->{waterway}||'x') eq 'stream') {
           $waydesc = 'a stream';
         } elsif ($highway eq 'footway') {
           $waydesc = 'a footpath';
@@ -392,7 +446,7 @@ sub write_tsv {
           die "Don't know how to describe this way";
         }
 
-        if ($pathelem->{way}{tag}{bridge}) {
+        if ($pathelem->{way}->tags->{bridge}) {
           $waydesc .= " bridge";
         }
 
@@ -403,7 +457,7 @@ sub write_tsv {
       $prev_way = $pathelem->{way};
     }
     
-    print $fh join("\t", $end_node->{lat}, $end_node->{lon}, $path->{pathlen}, $desc), "\n";
+    print $fh join("\t", $end_node->latitude, $end_node->longitude, $path->{pathlen}, $desc), "\n";
   }
 }
 
@@ -518,29 +572,33 @@ sub calculate_paths {
 
         #print $this_path->{pathlen}, ": ", join(", ", map {$_->{node}{id}} @{$this_path->{path}}), "\n";
 
-        if (exists $seen{$here->{id}}) {
-            if ($seen{$here->{id}}{pathlen} > $this_path->{pathlen}) {
+        if (exists $seen{$here->id}) {
+            if ($seen{$here->id}{pathlen} > $this_path->{pathlen}) {
                 $self->debug( "Hmm, found a shorter path later?  Shouldn't happen.\n");
             }
             next;
         }
 
-        $seen{$here->{id}} = $this_path;
+        $seen{$here->id} = $this_path;
 
         if ($this_path->{pathlen} > $longest_path->{pathlen}) {
             $longest_path = $this_path;
         }
 
-        for my $link (@{$here->{links}}) {
+        for my $link (@{$here->links}) {
             next unless $self->filter_link($link);
 
-            my $new_node = $self->{nodes}{$link->[1]};
+#            my $new_node = $self->{nodes}{$link->[1]};
+            my $new_node = $link->[1];
 
             my $new_path_elem = {
                                  node => $new_node,
                                  way  => $link->[0]
                                 };
-            my $new_len = $earth->range($here->{lat}, $here->{lon}, $new_node->{lat}, $new_node->{lon});
+            my $new_len = $earth->range($here->latitude,
+                                        $here->longitude,
+                                        $new_node->latitude,
+                                        $new_node->longitude);
             my $new_path = {
                             path => [
                                      @{$this_path->{path}},
@@ -560,7 +618,7 @@ sub calculate_paths {
             }
         }
 
-        if (not @{$here->{links}}) {
+        if (not @{$here->links}) {
             # Hmm.  This is the presumable cause of "gaps" in the outer rim.  OTOH, putting in all of these will make it no longer a rim so much as a bunch of dead ends.
             # I see no clear way of fixing this outside of completely revamping the UI... which I planned to do anyway.
         }

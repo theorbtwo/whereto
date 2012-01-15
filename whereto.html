@@ -94,13 +94,15 @@
         function load_data() {
             var start_params = jQuery('#startdata').serialize();
 
+            // Change icon/styling: http://docs.openlayers.org/library/feature_styling.html#styling
+
             var layer = new OpenLayers.Layer.Vector("WhereTo", {
             projection: map.displayProjection,
             //strategies: [new OpenLayers.Strategy.BBOX({resFactor: 1.1})],
             strategies: [new OpenLayers.Strategy.Fixed()],
             protocol: new OpenLayers.Protocol.HTTP({
             //url: "/~theorb/cgi-bin/whereto.cgi?" + start_params,
-            url: "http://lilith.local/~theorb/whereto/foo.tsv",
+            url: "/~theorb/whereto/foo.tsv",
             format: new OpenLayers.Format.Text()
             })
             
@@ -156,16 +158,15 @@
           <form id="startdata" action="" onsubmit="load_data()">
           <h3>Start Point</h3>
           <div>
-            <span><label for="id_latitude">Latitude</label><input id="id_latitude" name="latitude" type="text" value=""/></span>
-            <span><label for="id_longitude">Longitude</label><input id="id_longitude" type="text" name="longitude" value=""/></span>
+            <span><label for="id_latitude">Latitude </label><input id="id_latitude" name="latitude" type="text" value=""/></span>
+            <span><label for="id_longitude">Longitude </label><input id="id_longitude" type="text" name="longitude" value=""/></span>
           </div>
-          <div><label for="id_distance">Distance (miles)</label><input id="id_distance" name="distance" type="text" value=""/></div>
+          <div><label for="id_distance">Distance (miles) </label><input id="id_distance" name="distance" type="text" value=""/></div>
           <input type="submit" value="Show me!"/>
           </form>
         </p>
 
-        <p>Authors: <a href="http://boardgamegeek.com/user/castaway">Jess Robinson</a> and <a href="http://boardgamegeek.com/user/theorbtwo">James Mastros</a>. <a href="mailto:jandj@desert-island.me.uk">Email</a> or BGG PM us comments or requests for data in other countries</p>
-        <p><small><a href="/~castaway/web">Home</a></small></p>
+        <p>Authors: Jess Robinson and James Mastros. <a href="mailto:jandj@desert-island.me.uk">Email</a> comments or requests</p>
 
     </body>
 </html>

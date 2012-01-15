@@ -14,6 +14,11 @@ requires 'Geo::Parse::OSM::Multipass';
 requires 'Data::Dump::Streamer';
 requires 'Getopt::Long';
 requires 'Moose';
+requires 'JSON';
+requires 'DBIx::Class';
+requires 'DBIx::Class::TimeStamp';
+requires 'DBIx::Class::InflateColumn::Serializer::JSON';
+
 
 author 'James Mastros <james@mastros.biz>';
 license 'perl';
