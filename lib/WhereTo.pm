@@ -198,21 +198,15 @@ sub add_way {
         tags => $tags,
     });
 
+    my $position = 1;
     foreach my $node (@{$bit->{chain}}) {
 #        $self->debug("New chain: $node, ". $bit->{id}. "\n");
-        my $chain = $way->find_or_create_related('chains', { node_id => $node });
+        my $chain = $way->find_or_create_related('chains', 
+                                                 { 
+                                                     node_id => $node,
+                                                     position => $position++,
+                                                 });
     }
-
-    # my @nodes = @{$bit->{chain}};
-    
-    # for my $i (0..@nodes-1) {
-    #     my $prev_id = $i>0 ? $nodes[$i-1] : undef;
-    #     my $this_id = $nodes[$i];
-    #     my $next_id = $i<@nodes-1 ? $nodes[$i+1] : undef;
-        
-    #     push @{$self->{nodes}{$this_id}{links}}, [$bit, $prev_id] if $prev_id;
-    #     push @{$self->{nodes}{$this_id}{links}}, [$bit, $next_id] if $next_id;
-    # }
 }
 
 =head2 filter_node
@@ -492,6 +486,8 @@ sub write_tsv {
           $waydesc = 'a stream';
         } elsif ($highway eq 'footway') {
           $waydesc = 'a footpath';
+        } elsif ($highway eq 'bridleway') {
+          $waydesc = 'a bridleway';
         } else {
           
           print STDERR Dumper $pathelem;

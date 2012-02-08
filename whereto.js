@@ -3,6 +3,8 @@ var map;
 var markers_layer;
 var strategy = new OpenLayers.Strategy.Refresh({force: true, active: true});
 
+var click_mode = 'select';
+
 // Various projection/centring messing courtesy of:
 // http://openlayers.org/dev/examples/sundials-spherical-mercator.html
 
@@ -33,10 +35,59 @@ function init(){
     6
   );
   
+  // See http://openlayers.org/dev/examples/click.html
+  OpenLayers.Control.Click = OpenLayers.Class(OpenLayers.Control, {                
+                                                defaultHandlerOptions: {
+                                                  'single': true,
+                                                  'double': false,
+                                                  'pixelTolerance': 0,
+                                                  'stopSingle': false,
+                                                  'stopDouble': false
+                                                },
+                                                
+                                                initialize: function(options) {
+                                                  this.handlerOptions = OpenLayers.Util.extend(
+                                                    {}, this.defaultHandlerOptions
+                                                  );
+                                                  OpenLayers.Control.prototype.initialize.apply(
+                                                    this, arguments
+                                                  ); 
+                                                  this.handler = new OpenLayers.Handler.Click(
+                                                    this, {
+                                                      'click': this.trigger
+                                                    }, this.handlerOptions
+                                                  );
+                                                }, 
+                                                
+                                                trigger: function(e) {
+                                                  if (click_mode == 'passthrough') {
+                                                    return true;
+                                                  }
+
+                                                  var map_proj = map.getProjectionObject();
+
+                                                  var lonlat = map.getLonLatFromViewPortPx(e.xy);
+                                                  lonlat.transform(map_proj, new OpenLayers.Projection("EPSG:4326"));
+
+                                                  jQuery("#id_latitude").val(lonlat.lat);
+                                                  jQuery("#id_longitude").val(lonlat.lon);
+
+                                                  return false;
+                                                }
+                                              });
+
+  var click = new OpenLayers.Control.Click();
+  map.addControl(click);
+  click.activate();
   
   load_data();
 }
 
+
+
+function onClick(evt) {
+  
+}
 
 // Needed only for interaction, not for the display.
 function onPopupClose(evt) {
@@ -113,34 +164,8 @@ function load_data() {
   return false;
 }
 
-function update_tsv() {
-  // gather form data, run whereto.pl via ajax, update with resulting filename
-  var start_params = jQuery('#startdata').serialize();
-  
-  jQuery.ajax({
-                url: '/~theorb/whereto/whereto.pl',
-                data: start_params,
-                dataType: 'text',
-                timeout: 1200*1000,
-                success: set_tsv
-              });
-  
-  return false;
-}
-
-function set_tsv(tsv_filename) {
-  // set the layer url to '/~theorb/whereto/$tsv_filename
-
-    markers_layer.protocol.options.url = "/~theorb/whereto/" + tsv_filename;
-    strategy.refresh();
-    
-    markers_layer.loaded = false;
-    markers_layer.setVisibility(true),
-    markers_layer.refresh();
-
-    markers_layer.redraw();
-}
 
 jQuery(document).ready(function() {
     jQuery('#startdata').submit(update_tsv);
 });
+
