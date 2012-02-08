@@ -20,14 +20,18 @@ sub _build_schema {
     return WhereTo::Schema->connect('dbi:SQLite:/mnt/shared/projects/geo/osm/whereto/whereto.db');
 }
 
+sub nodes_rs {
+  my ($self) = @_;
+  return $self->schema->resultset('Node');
+}
+
 sub nodes {
-    my ($self) = @_;
-    return $self->schema->resultset('Node')->all();
+  $_[0]->nodes_rs->all();
 }
 
 ## TODO:
 # Add attributes for: nodes, earth, terminals, seen ?
-# Refactoring: Methods return results instead of stuffing into $self, add methods to get various parts of data that can be abstracted to data storage, 
+# Refactoring: Methods return results instead of stuffing into $self, add methods to get various parts of data that can be abstracted to data storage,
 # Extract method for prettifying directions
 
 
@@ -55,7 +59,7 @@ sub get_region {
   (my $north, undef) = $earth->at(@$center, $radius, 0);
   (undef, my $east)  = $earth->at(@$center, $radius, 90);
   (my $south, undef) = $earth->at(@$center, $radius, 180);
-  (undef, my $west)  = $earth->at(@$center, $radius, 180);
+  (undef, my $west)  = $earth->at(@$center, $radius, 270);
 
   $self->debugf ("North:  %f\n", $north);
   $self->debugf ("Center: %f\n", $center->[0]);
@@ -70,6 +74,9 @@ sub get_region {
   $self->debug( "Fetching $url\n" );
 
   my $xml = get($url);
+  if (!$xml) {
+    die "Fetching URL $url failed?";
+  }
   #print $xml, "\n\n";
 
   #my $xml = 'map?bbox=-1.77032811520983,51.5665801990025,-1.71286446285378,51.6023787132927';
@@ -97,7 +104,8 @@ sub parse_osm_xml {
   my ($self, $xml) = @_;
 
   my $parser = Geo::Parse::OSM::Multipass->new(\$xml,
-                                               pass2 => sub {$self->osm_handler(@_)},                                             );
+                                               pass2 => sub {$self->osm_handler(@_)},
+                                              );
 
   $parser->parse(sub {});
 
@@ -153,18 +161,31 @@ sub osm_handler {
 }
 
 sub add_node {
-    my ($self, $bit) = @_;
+  my ($self, $bit) = @_;
+  
+  state $exists_cache = {};
 
-    my $tags = $bit->{tag} ? JSON::encode_json($bit->{tag}) : undef;
-    $self->schema->resultset('Node')->find_or_create({
-        id => $bit->{id},
-        latitude => $bit->{lat},
-        longitude => $bit->{lon},
-        uid => $bit->{uid},
-        tags => $tags,
-    }, { key => 'primary'});
+  return if $exists_cache->{$bit->{id}};
+  
+  my $id_rs = $self->schema->resultset('Node')->search({id => {-between => [$bit->{id}, 
+                                                                            $bit->{id} + 100
+                                                                           ]}},
+                                                      );
+  $id_rs->result_class('DBIx::Class::ResultClass::HashRefInflator');
+  while (my $node = $id_rs->next) {
+    $exists_cache->{$node->{id}} = 1;
+  }
+  return if $exists_cache->{$bit->{id}};
 
-#    $self->{nodes}{$bit->{id}} = $bit;
+  my $tags = $bit->{tag} ? JSON::encode_json($bit->{tag}) : undef;
+  $self->schema->resultset('Node')->create({
+                                            id => $bit->{id},
+                                            latitude => $bit->{lat},
+                                            longitude => $bit->{lon},
+                                            uid => $bit->{uid},
+                                            tags => $tags,
+                                           }, { key => 'primary'});
+  #    $self->{nodes}{$bit->{id}} = $bit;
 }
 
 sub add_way {
@@ -214,7 +235,8 @@ sub filter_node {
   #Dump $node;
 
   # No links -- it's a PoI, not a part of a way.
-  return 0 if !$node->chains->count;
+  # On the other hand, $node->links will effectively filter these out anyway, so we're checking twice for no gain.
+  # return 0 if !$node->chains->count;
 
   # If any of the potential links are something that we can walk on, keep the node.
   for my $link (@{$node->links}) {
@@ -289,23 +311,52 @@ part of a (walkable) way.
 =cut
 
 sub find_nearest_node {
-  my ($self, $ll) = @_;
+  my ($self, $center) = @_;
+#  $self->schema->storage->debug(1);
 
   my $earth = $self->earth;
 
-  my ($best_dist, $best_node) = (9e999, undef);
-  for my $node ($self->nodes) {
-    next if !$self->filter_node($node);
-
-    my $dist = $earth->range(@$ll, $node->latitude, $node->longitude);
-    if ($best_dist > $dist) {
-      $best_dist = $dist;
-      $best_node = $node;
+  my $radius = 1/8;
+  while (1) {
+    
+    my $earth = $self->earth;
+    (my $north, undef) = $earth->at(@$center, $radius, 0);
+    (undef, my $east)  = $earth->at(@$center, $radius, 90);
+    (my $south, undef) = $earth->at(@$center, $radius, 180);
+    (undef, my $west)  = $earth->at(@$center, $radius, 270);
+    
+    
+    my ($best_dist, $best_node) = (9e999, undef);
+    
+    # POSITIVE DIRECTION ON THE RIGHT OF BETWEEN!
+    my $nodes_rs = $self->nodes_rs->search({latitude => {-between => [$south, $north]},
+                                            longitude => {-between => [$west, $east]}
+                                           });
+    while (my $node = $nodes_rs->next) {
+      next if !$self->filter_node($node);
+      
+      my $dist = $earth->range(@$center, $node->latitude, $node->longitude);
+      if ($best_dist > $dist) {
+        $best_dist = $dist;
+        $best_node = $node;
+      }
+    }
+    
+    if ($best_node) {
+      $self->debug("find_nearest_node: best node was $best_dist miles away\n" );
+#      $self->schema->storage->debug(0);
+      return $best_node;
+    } else {
+      if ($radius > 5) {
+        $self->debug("This is just getting silly, couldn't find nearest node within $radius miles, stopping\n");
+#        $self->schema->storage->debug(0);
+        
+        return undef;
+      }
+      $self->debug("Couldn't find nearest node within $radius miles, doubling\n");
+      $radius *= 2;
     }
   }
-
-  $self->debug("find_nearest_node: best node was $best_dist miles away\n" );
-  return $best_node;
 }
 
 =head2
@@ -442,8 +493,11 @@ sub write_tsv {
         } elsif ($highway eq 'footway') {
           $waydesc = 'a footpath';
         } else {
-          Dump $pathelem;
-          die "Don't know how to describe this way";
+          
+          print STDERR Dumper $pathelem;
+          warn "Don't know how to describe this way";
+
+          $waydesc = 'some confusing thingy';
         }
 
         if ($pathelem->{way}->tags->{bridge}) {
@@ -476,9 +530,9 @@ Writes out KML data representing the nodes reached from the start point.
 =cut
 
 sub write_kml {
-    my ($self, $start_ll, $terminals, $filename) = @_;
+    my ($self, $start_ll, $filename) = @_;
 
-    $terminals = $self->terminals;
+    my $terminals = $self->{terminals};
 
     open my $kml_out, '>', $filename;
 
@@ -541,13 +595,12 @@ the results in $self->{terminals} and $self->{seen}.
 
 sub calculate_paths {
     my ($self, $start_ll, $target_len, $filename) = @_;
-#    my $start_ll = [51.584483, -1.741585];
-#    my $target_len = 1.75;
+
     my $osm_xml = $self->get_region($start_ll, $target_len);
     $self->parse_osm_xml($osm_xml);
 
     my $start = $self->find_nearest_node($start_ll);
-    Dump $start;
+    #Dump $start;
 
 
     my $earth = $self->earth;

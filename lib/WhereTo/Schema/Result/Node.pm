@@ -40,6 +40,10 @@ __PACKAGE__->has_many('chains', 'WhereTo::Schema::Result::Chain', 'node_id');
 sub links {
     my ($self) = @_;
 
+    if ($self->{cached_links}) {
+      return $self->{cached_links};
+    }
+
     my @chains = $self->chains->search({}, {
         order_by => [{ '-asc' => 'position' }],
         prefetch => ['way'],
@@ -49,6 +53,8 @@ sub links {
 
     my @links = ();
     for my $chain (@chains) {
+        # Can probably be sped up, if made less simple, by searching WHERE position = $chain->position + 1 OR position = $chain->position - 1
+
         # If position is 1, we're at the beginning of the way.
         if ($chain->position > 1) {
             my $prev = $chain->way->chains->search({ position => $chain->position-1 })->single->node;
@@ -72,6 +78,8 @@ sub links {
     #     push @links, [$chains[$i]->way, $prev] if $prev;
     #     push @links, [$chains[$i]->way, $next] if $next;
     # }
+
+    $self->{cached_links} = \@links;
 
     return \@links;
 }

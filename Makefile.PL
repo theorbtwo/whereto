@@ -7,6 +7,7 @@ use inc::Module::Install '1.01';
 
 version  '1.0';
 
+requires 'DateTime::TimeZone';
 requires 'strictures';
 requires 'Geo::Ellipsoid';
 requires 'LWP::Simple';

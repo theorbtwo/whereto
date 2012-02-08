@@ -6,6 +6,7 @@
         <link rel="stylesheet" href="/~castaway/web/css/my.css" type="text/css" media="screen, projection">
         <title>Where can I get to from here?</title>
         <link rel="stylesheet" href="http://openlayers.org/dev/theme/default/style.css" type="text/css" />
+
         <link rel="stylesheet" href="style.css" type="text/css" />
 
 
@@ -23,7 +24,8 @@
         </script>
 
         <script src="http://maps.google.com/maps/api/js?sensor=false"></script>
-        <script src="http://openlayers.org/api/OpenLayers.js"></script>
+<!--        <script src="http://openlayers.org/api/OpenLayers.js"></script> -->
+        <script src="/~theorb/whereto/OpenLayers-2.11/lib/OpenLayers.js"></script>
         <script src="http://ajax.googleapis.com/ajax/libs/jquery/1.7.1/jquery.min.js" type="text/javascript"></script>
         <script src="whereto.js" type="text/javascript"></script>
 
@@ -35,7 +37,7 @@
         <p>Showing a map of where you can walk/drive/cycle to, on
         actual streets and paths</p>
         <div id="map"></div>
-
+<!--
         <div class="monitization" style="float: right">
           Like this?  Show your appreciation!<br/>
           Give me money: 
@@ -53,9 +55,10 @@
 <script>!function(d,s,id){var
   js,fjs=d.getElementsByTagName(s)[0];if(!d.getElementById(id)){js=d.createElement(s);js.id=id;js.src="//platform.twitter.com/widgets.js";fjs.parentNode.insertBefore(js,fjs);}}(document,"script","twitter-wjs");</script><br />
         </div>
+-->
 
         <p>
-          <form id="startdata" action="" onsubmit="load_data()">
+          <form id="startdata" action="">
           <h3>Start Point</h3>
           <div>
             <span><label for="id_latitude">Latitude </label><input id="id_latitude" name="latitude" type="text" value=""/></span>
